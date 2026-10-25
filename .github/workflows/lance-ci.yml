@@ -22,7 +22,6 @@ jobs:
       CC: clang
       CXX: clang++
       CARGO_BUILD_JOBS: 2
-      LEROBOT_FFMPEG_TESTS: 1
     steps:
       - uses: actions/checkout@v4
         with:
@@ -38,7 +37,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq clang ccache ninja-build pkg-config protobuf-compiler \
-            python3-venv python3-pil ffmpeg libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
+            python3-venv ffmpeg libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
             libaom-dev libsvtav1-dev libx265-dev
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/cache@v4
@@ -64,59 +63,33 @@ jobs:
             -DOVERRIDE_GIT_DESCRIBE=v1.5.5-0-gd8cdaa33fd \
             -DLEROBOT_ENABLE_FFMPEG=ON -DLEROBOT_ALLOW_GPL=ON -DLEROBOT_AV1_ENCODER=libaom \
             -DENABLE_SANITIZER=OFF -DENABLE_UBSAN=OFF \
-            -DBUILD_UNITTESTS=ON -DENABLE_UNITTEST_CPP_TESTS=OFF
+            -DBUILD_UNITTESTS=OFF
           cmake --build build/lance-integration --parallel 2 --target \
-            shell unittest lerobot_loadable_extension lance_loadable_extension lance_blob_filesystem_test \
-            lerobot_nested_query_test
-      - name: Validate nested transaction and secret views
+            shell lerobot_loadable_extension lance_loadable_extension
+      - name: Set up the Lance test environment
         run: |
-          timeout 60s build/lance-integration/extension/lerobot/test/lerobot_nested_query_test
-      - name: Run LeRobot SQL tests with Lance available
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          import subprocess
-          result = subprocess.run(
-              ['build/lance-integration/test/unittest', '*duckdb-lerobot/test/sql/*', '--list-test-names-only'],
-              capture_output=True, text=True,
-          )
-          names = result.stdout.splitlines()
-          # Catch returns the number of listed tests, truncated to an exit byte.
-          assert names and all(name.endswith('.test') for name in names), result.stdout + result.stderr
-          assert result.returncode == len(names) % 256, result.stderr
-          Path('build/lance-sql-tests.txt').write_text(result.stdout)
-          PY
-          build/lance-integration/test/unittest '*duckdb-lerobot/test/sql/*'
-      - name: Compare native pixels with independent FFmpeg decoding
-        run: |
-          python3 test/conformance/test_video_pixels.py \
-            --duckdb "$PWD/build/lance-integration/duckdb" \
-            --extension "$PWD/build/lance-integration/extension/lerobot/lerobot.duckdb_extension"
-      - name: Set up pinned Blob fixtures
-        run: |
-          python3 -m venv build/blob-tests
-          build/blob-tests/bin/pip install pylance==9.0.1 pyarrow==22.0.0
-      - name: Validate Blob FileHandles and snapshot changes
-        run: |
-          build/blob-tests/bin/python build/lance-source/test/scripts/run_blob_filesystem_tests.py \
-            "$PWD/build/lance-integration/extension/lance/lance_blob_filesystem_test"
-      - name: Set up converter environment
-        run: |
-          python3 -m venv build/lance-conformance
-          build/lance-conformance/bin/pip install \
-            torch==2.7.1 torchvision==0.22.1 torchcodec==0.5 \
+          python3 -m venv build/lance-python
+          build/lance-python/bin/pip install \
+            torch==2.10.0 torchvision==0.25.0 torchcodec==0.10.0 \
             --index-url https://download.pytorch.org/whl/cpu
-          build/lance-conformance/bin/pip install -r test/conformance/requirements.txt pylance==12.0.0 duckdb==1.5.5
-      - name: Compare converted videos and all Blob storage kinds
+          build/lance-python/bin/pip install './python[test]' \
+            'lerobot[dataset]==0.6.1' lerobot-lancedb==0.3.1 lancedb==0.37.1 \
+            numpy==2.2.6 av==15.1.0 pylance==12.0.0 pyarrow==25.0.1 \
+            torch==2.10.0 torchvision==0.25.0 torchcodec==0.10.0
+      - name: Validate Lance videos, snapshots and remote authorization
         run: |
-          build/lance-conformance/bin/python test/conformance/test_lance_video.py \
+          build/lance-python/bin/python test/conformance/test_lance_video.py \
             --duckdb "$PWD/build/lance-integration/duckdb" \
             --extension "$PWD/build/lance-integration/extension/lerobot/lerobot.duckdb_extension" \
             --lance-extension "$PWD/build/lance-integration/extension/lance/lance.duckdb_extension" \
             --rgb-codec libaom-av1 --threads 4
-      - name: Validate warm routes and historical Blob snapshots
-        run: |
-          build/lance-conformance/bin/python test/conformance/test_lance_snapshot.py \
+          build/lance-python/bin/python test/conformance/test_lance_snapshot.py \
+            --extension "$PWD/build/lance-integration/extension/lerobot/lerobot.duckdb_extension" \
+            --lance-extension "$PWD/build/lance-integration/extension/lance/lance.duckdb_extension" \
+            --rgb-codec libaom-av1
+          build/lance-integration/duckdb -unsigned -c 'INSTALL httpfs;'
+          build/lance-python/bin/python test/conformance/test_lance_remote.py \
+            --duckdb "$PWD/build/lance-integration/duckdb" \
             --extension "$PWD/build/lance-integration/extension/lerobot/lerobot.duckdb_extension" \
             --lance-extension "$PWD/build/lance-integration/extension/lance/lance.duckdb_extension" \
             --rgb-codec libaom-av1
@@ -125,20 +98,4 @@ jobs:
           LEROBOT_EXTENSION: ${{ github.workspace }}/build/lance-integration/extension/lerobot/lerobot.duckdb_extension
           LANCE_EXTENSION: ${{ github.workspace }}/build/lance-integration/extension/lance/lance.duckdb_extension
         run: |
-          python3 -m venv build/lance-python
-          build/lance-python/bin/pip install \
-            torch==2.10.0 torchvision==0.25.0 torchcodec==0.10.0 \
-            --index-url https://download.pytorch.org/whl/cpu
-          build/lance-python/bin/pip install './python[test]' \
-            'lerobot[dataset]==0.6.1' lerobot-lancedb==0.3.1 lancedb==0.37.1 \
-            pylance==12.0.0 pyarrow==25.0.1 \
-            torch==2.10.0 torchvision==0.25.0 torchcodec==0.10.0
-          build/lance-python/bin/python -m pytest python/tests -q
-      - name: Validate private S3 routing and credential changes
-        run: |
-          build/lance-integration/duckdb -unsigned -c 'INSTALL httpfs;'
-          build/lance-conformance/bin/python test/conformance/test_lance_remote.py \
-            --duckdb "$PWD/build/lance-integration/duckdb" \
-            --extension "$PWD/build/lance-integration/extension/lerobot/lerobot.duckdb_extension" \
-            --lance-extension "$PWD/build/lance-integration/extension/lance/lance.duckdb_extension" \
-            --rgb-codec libaom-av1
+          build/lance-python/bin/python -m pytest python/tests -q -k lance

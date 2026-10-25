@@ -114,11 +114,11 @@ class TorchCodecReader:
 
     def _decoder(self, path: str) -> Any:
         is_blob = path.startswith("lance-blob://")
+        payload = None
         if is_blob:
             key = path
-            # Reopen even on a warm decoder: credentials and filesystem access
-            # may have changed since its encoded bytes were cached. Projecting
-            # only size opens the file without reading the complete payload.
+            # Check the bound before reading bytes, including on cache hits.
+            # Metadata access alone does not establish payload GET permission.
             row = self.connection.execute(
                 "SELECT size FROM read_blob(?)", [path]
             ).fetchone()
@@ -130,6 +130,14 @@ class TorchCodecReader:
                     f"Lance video blob size {size} exceeds max_video_bytes "
                     f"({self.max_video_bytes}); increase the limit or use SQL decoding"
                 )
+            # read_blob has no range-read interface. Read the bounded payload
+            # before reusing a decoder so server-side GET revocation is honored.
+            row = self.connection.execute(
+                "SELECT content FROM read_blob(?)", [path]
+            ).fetchone()
+            if row is None or row[0] is None or len(row[0]) != size:
+                raise ValueError("Lance video blob size changed while reading")
+            payload = row[0]
         else:
             if "://" in path:
                 raise ValueError(
@@ -153,14 +161,7 @@ class TorchCodecReader:
             ) from exc
         if len(self._decoders) >= self.max_cached_decoders:
             self._decoders.popitem(last=False)
-        source: str | bytes = key
-        if is_blob:
-            row = self.connection.execute(
-                "SELECT content FROM read_blob(?)", [path]
-            ).fetchone()
-            if row is None or row[0] is None or len(row[0]) != size:
-                raise ValueError("Lance video blob size changed while reading")
-            source = row[0]
+        source: str | bytes = payload if payload is not None else key
         decoder = VideoDecoder(
             source,
             device=self.device,

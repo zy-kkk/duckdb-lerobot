@@ -434,6 +434,9 @@ def test_lance_warm_decoder_secret_revocation(
         for file in lance_dataset.rglob("*")
         if file.is_file()
     }
+    # V2 manifest names sort newest first. Supply reverse insertion order so
+    # the fixture must honor S3's lexicographical listing contract.
+    objects = dict(sorted(objects.items(), reverse=True))
     with s3_server(objects) as (endpoint, counts):
         secret = (
             "CREATE OR REPLACE SECRET reader_video_access (TYPE LANCE, "
@@ -469,6 +472,68 @@ def test_lance_warm_decoder_secret_revocation(
                 assert reader._decoder(remote) is decoder
         assert counts["accepted"] > 0
         assert counts["denied"] > 0
+
+
+@pytest.mark.parametrize("cache", [False, True])
+def test_lance_warm_decoder_payload_get_revocation(
+    lance_connection, lance_dataset, monkeypatch, cache
+):
+    monkeypatch.syspath_prepend(
+        str(Path(__file__).resolve().parents[2] / "test/conformance")
+    )
+    from test_session_settings import s3_server, sql_string
+
+    _blob_storage(lance_dataset, "dedicated")
+    objects = {
+        f"dataset/{file.relative_to(lance_dataset).as_posix()}": file.read_bytes()
+        for file in lance_dataset.rglob("*")
+        if file.is_file()
+    }
+    payload_paths = {
+        "/fixture-bucket/" + key for key in objects if key.endswith(".blob")
+    }
+    assert payload_paths
+    revoked = False
+    payload_gets = []
+
+    def access(method, path, authorized):
+        if method == "GET" and path in payload_paths:
+            payload_gets.append(path)
+            return authorized and not revoked
+        return authorized
+
+    with s3_server(objects, request_access=access) as (endpoint, counts):
+        lance_connection.execute(
+            "CREATE SECRET reader_payload_access (TYPE LANCE, "
+            "SCOPE 's3://fixture-bucket/dataset/', ACCESS_KEY_ID 'fixture-session-id', "
+            "SECRET_ACCESS_KEY 'fixture-session-key', REGION 'us-east-1', "
+            f"ENDPOINT {sql_string('http://' + endpoint)}, ALLOW_HTTP true, "
+            "VIRTUAL_HOSTED_STYLE_REQUEST false)"
+        )
+        lance_connection.execute(f"SET enable_external_file_cache={str(cache).lower()}")
+        remote = lance_connection.execute(
+            "SELECT lance_blob_uri(?, 'video_bytes', _rowid) "
+            "FROM 's3://fixture-bucket/dataset/videos.lance' LIMIT 1",
+            ["s3://fixture-bucket/dataset/videos.lance"],
+        ).fetchone()[0]
+        with TorchCodecReader(lance_connection, lance_dataset) as reader:
+            decoder = reader._decoder(remote)
+            assert payload_gets
+            revoked = True
+            payload_gets.clear()
+            # HEAD and all manifest/descriptor reads remain authorized.
+            assert (
+                lance_connection.execute(
+                    "SELECT size FROM read_blob(?)", [remote]
+                ).fetchone()[0]
+                > 0
+            )
+            assert not payload_gets
+            with pytest.raises(duckdb.Error, match="403|[Ff]orbidden|[Aa]ccess"):
+                reader._decoder(remote)
+            assert payload_gets and counts["denied"] > 0
+            revoked = False
+            assert reader._decoder(remote) is decoder
 
 
 def test_lance_decode_failure_releases_result(lance_connection, lance_dataset):

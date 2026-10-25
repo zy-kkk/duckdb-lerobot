@@ -89,7 +89,10 @@ FROM lerobot_scan('hf://datasets/lance-format/pusht-lance', episode_indices := [
 ```
 
 Image features are returned as the same `STRUCT(bytes BLOB, path VARCHAR)`
-columns as in the Parquet layout.
+columns as in the Parquet layout. In nonempty datasets, `language_persistent`
+and `language_events` retain their nested layout, including structured tool-call
+arguments inferred by the LeRobot annotation writer. String-valued `tool_calls`
+are exposed as JSON lists, restoring the JSON type stripped by the converter.
 
 `lerobot_scan` loads Lance on demand and installs it if automatic installation is
 enabled. Plain v3 datasets and the metadata-only functions, including
@@ -159,7 +162,9 @@ packed, dedicated and external Blob v2 values. Historical versions and their
 files must remain available while the paths are in use. Each open applies the
 current permissions and target-scoped `TYPE LANCE` credentials. Metadata under
 `meta/` still uses DuckDB/httpfs credentials. Lance target timestamp lookups
-use filtered native queries without the Parquet shard index.
+use filtered native queries without the Parquet shard index. Video binding
+reloads the full video route table to observe snapshot changes, so repeated
+small queries still incur dataset-wide route metadata work.
 
 LeRobot's internal readers use separate connections. In an explicit transaction,
 they pin a child transaction and compare its complete secret catalog view with

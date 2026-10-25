@@ -215,7 +215,13 @@ void BuildFrameSchema(LerobotDatasetInfo &info, const vector<ParsedLerobotFeatur
 			throw BinderException("LeRobot visual feature '%s' requires %d HWC channel(s)", feature.name,
 			                      feature.is_depth ? 1 : 3);
 		}
-		if (feature.dtype != "video") {
+		if (feature.dtype == "language" && info.storage_format == "lance" && info.total_episodes > 0 &&
+		    (feature.name == "language_persistent" || feature.name == "language_events") && feature.shape.size() == 1 &&
+		    feature.shape[0] == 1) {
+			// Annotation writers infer nested language types from the payload. Defer
+			// these types to the frame scan without opening Lance for metadata reads.
+			AppendColumn(info.frame_schema, feature.name, LogicalType::ANY);
+		} else if (feature.dtype != "video") {
 			AppendColumn(info.frame_schema, feature.name, LerobotFeatureScanType(feature.dtype, feature.shape));
 		}
 	}

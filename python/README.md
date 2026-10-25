@@ -76,8 +76,11 @@ For Lance datasets, load a matching AstroVela/lance-duckdb extension providing
 reader passes `lance-blob://` paths unchanged to DuckDB's `read_blob` on the
 original connection, including its session settings, secrets and filesystem
 access checks. Blob payloads can reside remotely if the connection authorizes
-their storage. The reader reopens the blob to check authorization even when its
-decoder is cached. Do not mutate secrets or settings concurrently with decoding.
+their storage. Before every decoder reuse, the reader reads the complete
+size-bounded payload again to enforce current GET permissions; a metadata-only
+check cannot detect payload GET revocation. Decoder caching saves decoder
+initialization, not these payload reads. Do not mutate secrets or settings
+concurrently with decoding.
 
 Lance decoding loads each complete encoded video into memory before passing it
 to TorchCodec. `max_video_bytes` (default 64 MiB) rejects larger blobs before
