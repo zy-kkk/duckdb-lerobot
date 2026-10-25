@@ -4,14 +4,17 @@
 #include "duckdb/parser/expression/function_expression.hpp"
 #include "duckdb/parser/tableref/joinref.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/parser/expression/columnref_expression.hpp"
+#include "duckdb/parser/expression/cast_expression.hpp"
 #include "duckdb/parser/expression/constant_expression.hpp"
 #include "duckdb/parser/expression/operator_expression.hpp"
 #include "duckdb/parser/expression/star_expression.hpp"
 #include "duckdb/parser/query_node/select_node.hpp"
 #include "duckdb/parser/statement/select_statement.hpp"
 #include "duckdb/parser/tableref/subqueryref.hpp"
+#include "duckdb/parser/tableref/basetableref.hpp"
 
 #include "lerobot_path.hpp"
 #include "storage/lerobot_metadata_cache.hpp"
@@ -178,6 +181,43 @@ unique_ptr<TableRef> LerobotScanBindReplace(ClientContext &context, TableFunctio
 	const auto refresh = GetRefreshParameter(input);
 	auto metadata = LerobotDatasetMetadata::Get(context, root, refresh);
 	auto parameters = GetParquetParameters(input);
+	if (metadata->IsLance()) {
+		if (!parameters.empty()) {
+			throw BinderException("lerobot_scan parameter '%s' is only supported for Parquet datasets",
+			                      parameters.begin()->first);
+		}
+		const auto &schema = metadata->GetFrameSchema();
+		if (metadata->GetEpisodeCount() == 0) {
+			return LerobotCreateEmptyParquetRelation(context, schema.names, schema.types);
+		}
+		EnsureLerobotLanceExtension(context);
+		LerobotCheckLanceFrameCount(context, *metadata);
+		auto source = make_uniq<BaseTableRef>();
+		source->table_name = metadata->GetDataFiles().front();
+		auto select = make_uniq<SelectNode>();
+		select->from_table = std::move(source);
+		for (idx_t index = 0; index < schema.names.size(); index++) {
+			auto column = make_uniq<ColumnRefExpression>(StringUtil::Replace(schema.names[index], ".", "_"));
+			auto cast = make_uniq<CastExpression>(schema.types[index], std::move(column));
+			cast->SetAlias(schema.names[index]);
+			select->select_list.push_back(std::move(cast));
+		}
+		if (requested_episodes != input.named_parameters.end()) {
+			if (episode_indices.empty()) {
+				select->where_clause = make_uniq<ConstantExpression>(Value::BOOLEAN(false));
+			} else {
+				vector<unique_ptr<ParsedExpression>> children;
+				children.push_back(make_uniq<ColumnRefExpression>("episode_index"));
+				for (const auto episode_index : episode_indices) {
+					children.push_back(make_uniq<ConstantExpression>(Value::BIGINT(episode_index)));
+				}
+				select->where_clause = make_uniq<OperatorExpression>(ExpressionType::COMPARE_IN, std::move(children));
+			}
+		}
+		auto statement = make_uniq<SelectStatement>();
+		statement->node = std::move(select);
+		return make_uniq<SubqueryRef>(std::move(statement));
+	}
 
 	if (requested_episodes == input.named_parameters.end()) {
 		if (metadata->GetDataFiles().empty()) {
